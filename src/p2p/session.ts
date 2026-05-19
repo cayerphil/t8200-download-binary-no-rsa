@@ -2234,10 +2234,88 @@ const isT8200BinaryDownload =
     this.currentMessageState[P2PDataType.BINARY].p2pStreaming;
 
 if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
+    const rsaKey = this.currentMessageState[message.dataType].rsaKey;
+
+    const candidates = [
+        { name: "offset20_len128", start: 20, len: 128 },
+        { name: "offset21_len128", start: 21, len: 128 },
+        { name: "offset22_len128_original", start: 22, len: 128 },
+        { name: "offset23_len128", start: 23, len: 128 },
+        { name: "offset24_len128", start: 24, len: 128 },
+        { name: "offset150_len128", start: 150, len: 128 },
+        { name: "offset151_len128", start: 151, len: 128 },
+    ];
+
+    if (rsaKey) {
+        for (const candidate of candidates) {
+            const candidateBlock = message.data.subarray(
+                candidate.start,
+                candidate.start + candidate.len
+            );
+
+            if (candidateBlock.length !== candidate.len) {
+                rootP2PLogger.warn(
+                    `T8200 RSA candidate skipped: block too short`,
+                    {
+                        stationSN: this.rawStation.station_sn,
+                        candidate: candidate.name,
+                        start: candidate.start,
+                        expectedLength: candidate.len,
+                        actualLength: candidateBlock.length,
+                    }
+                );
+
+                continue;
+            }
+
+            try {
+                const decrypted = rsaKey.decrypt(candidateBlock);
+
+                rootP2PLogger.warn(
+                    `T8200 RSA candidate decrypted`,
+                    {
+                        stationSN: this.rawStation.station_sn,
+                        candidate: candidate.name,
+                        start: candidate.start,
+                        encryptedLength: candidateBlock.length,
+                        decryptedLength: decrypted.length,
+                        decryptedFirst16Hex: decrypted.subarray(0, 16).toString("hex"),
+                    }
+                );
+            } catch (err) {
+                const error = ensureError(err);
+
+                rootP2PLogger.warn(
+                    `T8200 RSA candidate failed`,
+                    {
+                        stationSN: this.rawStation.station_sn,
+                        candidate: candidate.name,
+                        start: candidate.start,
+                        encryptedLength: candidateBlock.length,
+                        encryptedFirst16Hex: candidateBlock.subarray(0, 16).toString("hex"),
+                        error: getError(error),
+                    }
+                );
+            }
+        }
+    } else {
+        rootP2PLogger.warn(
+            `T8200 RSA diagnostics: RSA key missing`,
+            {
+                stationSN: this.rawStation.station_sn,
+                commandIdName: CommandType[message.commandId],
+                commandId: message.commandId,
+                channel: message.channel,
+                dataLength: data_length,
+                signCode: message.signCode,
+            }
+        );
+    }
+
     payloadStart = 151;
 
     rootP2PLogger.warn(
-        `T8200 download patch B: skipping RSA/AES key block for DATA BINARY frame`,
+        `T8200 download patch D: RSA diagnostics completed, continuing with Patch B payloadStart`,
         {
             stationSN: this.rawStation.station_sn,
             commandIdName: CommandType[message.commandId],
