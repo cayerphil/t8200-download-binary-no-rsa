@@ -2237,8 +2237,66 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
+    const findH264StartCodes = (
+        buffer: Buffer,
+        baseOffset: number,
+        scanLength: number
+    ): Array<{ offset: number; prefix: string; nalType: number; first16Hex: string }> => {
+        const results: Array<{ offset: number; prefix: string; nalType: number; first16Hex: string }> = [];
+        const max = Math.min(buffer.length - 5, scanLength);
+
+        for (let i = 0; i <= max; i++) {
+            const isFourByteStartCode =
+                buffer[i] === 0x00 &&
+                buffer[i + 1] === 0x00 &&
+                buffer[i + 2] === 0x00 &&
+                buffer[i + 3] === 0x01;
+
+            const isThreeByteStartCode =
+                buffer[i] === 0x00 &&
+                buffer[i + 1] === 0x00 &&
+                buffer[i + 2] === 0x01;
+
+            if (isFourByteStartCode) {
+                const nalByte = buffer[i + 4];
+                const nalType = nalByte & 0x1f;
+
+                results.push({
+                    offset: baseOffset + i,
+                    prefix: "00000001",
+                    nalType,
+                    first16Hex: buffer.subarray(i, i + 16).toString("hex"),
+                });
+            } else if (isThreeByteStartCode) {
+                const nalByte = buffer[i + 3];
+                const nalType = nalByte & 0x1f;
+
+                results.push({
+                    offset: baseOffset + i,
+                    prefix: "000001",
+                    nalType,
+                    first16Hex: buffer.subarray(i, i + 16).toString("hex"),
+                });
+            }
+
+            if (results.length >= 20) {
+                break;
+            }
+        }
+
+        return results;
+    };
+
+    const sliceForLog = (start: number, length: number): string => {
+        return message.data.subarray(start, start + length).toString("hex");
+    };
+
+    const from0 = message.data.subarray(0);
+    const from22 = message.data.subarray(22);
+    const from151 = message.data.subarray(151);
+
     rootP2PLogger.warn(
-        `T8200 download patch F: bypass RSA/AES and keep original video payload offset`,
+        `T8200 download patch G: signCode frame structure diagnostic`,
         {
             stationSN: this.rawStation.station_sn,
             commandIdName: CommandType[message.commandId],
@@ -2252,238 +2310,26 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
             videoWidth: videoMetaData.videoWidth,
             videoHeight: videoMetaData.videoHeight,
             videoDataLength: videoMetaData.videoDataLength,
+
+            messageDataLength: message.data.length,
+
+            first64_from0_hex: sliceForLog(0, 64),
+            first256_from0_hex: sliceForLog(0, 256),
+
+            first64_from22_hex: sliceForLog(22, 64),
+            first256_from22_hex: sliceForLog(22, 256),
+
+            first64_from151_hex: sliceForLog(151, 64),
+            first256_from151_hex: sliceForLog(151, 256),
+
+            h264StartCodes_from0_first2048: findH264StartCodes(from0, 0, 2048),
+            h264StartCodes_from22_first2048: findH264StartCodes(from22, 22, 2048),
+            h264StartCodes_from151_first2048: findH264StartCodes(from151, 151, 2048),
         }
     );
 } else if (message.signCode > 0 && data_length >= 128) {
+
   
-            const key = message.data.subarray(22, 150);
-            const rsaKey = this.currentMessageState[message.dataType].rsaKey;
-            if (rsaKey) {
-              try {
-                videoMetaData.aesKey = rsaKey.decrypt(key).toString("hex");
-                rootP2PLogger.trace(`Handle DATA ${P2PDataType[message.dataType]} - Decrypted AES key`, {
-                  stationSN: this.rawStation.station_sn,
-                  key: videoMetaData.aesKey,
-                });
-              } catch (err) {
-                const error = ensureError(err);
-                rootP2PLogger.warn(`Error: AES key could not be decrypted! The entire stream is discarded.`, {
-                  error: getError(error),
-                  stationSN: this.rawStation.station_sn,
-                  key: key.toString("hex"),
-                });
-                this.currentMessageState[message.dataType].invalidStream = true;
-                this.emit(
-                  "livestream error",
-                  message.channel,
-                  new LivestreamError("Station AES key could not be decrypted! The entire stream is discarded.", {
-                    context: { station: this.rawStation.station_sn },
-                  })
-                );
-                return;
-              }
-            } else {
-              rootP2PLogger.warn(
-                `Private RSA key is missing! Stream could not be decrypted. The entire stream for station ${this.rawStation.station_sn} is discarded.`
-              );
-              this.currentMessageState[message.dataType].invalidStream = true;
-              this.emit(
-                "livestream error",
-                message.channel,
-                new LivestreamError(
-                  "Station Private RSA key is missing! Stream could not be decrypted. The entire stream is discarded.",
-                  { context: { station: this.rawStation.station_sn } }
-                )
-              );
-              return;
-            }
-            payloadStart = 151;
-          }
-
-          let video_data: Buffer;
-          if (videoMetaData.aesKey !== "") {
-            const encrypted_data = message.data.subarray(payloadStart, payloadStart + 128);
-            const unencrypted_data = message.data.subarray(
-              payloadStart + 128,
-              payloadStart + videoMetaData.videoDataLength
-            );
-            video_data = Buffer.concat([decryptAESData(videoMetaData.aesKey, encrypted_data), unencrypted_data]);
-          } else {
-            video_data = message.data.subarray(payloadStart, payloadStart + videoMetaData.videoDataLength);
-          }
-
-          rootP2PLogger.trace(`Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME`, {
-            stationSN: this.rawStation.station_sn,
-            dataSize: message.data.length,
-            metadata: videoMetaData,
-            videoDataSize: video_data.length,
-          });
-
-          this.currentMessageState[message.dataType].p2pStreamMetadata.videoFPS = videoMetaData.videoFPS;
-          this.currentMessageState[message.dataType].p2pStreamMetadata.videoHeight = videoMetaData.videoHeight;
-          this.currentMessageState[message.dataType].p2pStreamMetadata.videoWidth = videoMetaData.videoWidth;
-
-          if (!this.currentMessageState[message.dataType].p2pStreamFirstVideoDataReceived) {
-            if (
-              this.rawStation.station_sn.startsWith("T8410") ||
-              this.rawStation.station_sn.startsWith("T8400") ||
-              this.rawStation.station_sn.startsWith("T8401") ||
-              this.rawStation.station_sn.startsWith("T8411") ||
-              this.rawStation.station_sn.startsWith("T8202") ||
-              this.rawStation.station_sn.startsWith("T8422") ||
-              this.rawStation.station_sn.startsWith("T8424") ||
-              this.rawStation.station_sn.startsWith("T8423") ||
-              this.rawStation.station_sn.startsWith("T8130") ||
-              this.rawStation.station_sn.startsWith("T8131") ||
-              this.rawStation.station_sn.startsWith("T8420") ||
-              this.rawStation.station_sn.startsWith("T8440") ||
-              this.rawStation.station_sn.startsWith("T8171") ||
-              this.rawStation.station_sn.startsWith("T8426") ||
-              this.rawStation.station_sn.startsWith("T8441") ||
-              this.rawStation.station_sn.startsWith("T8442") ||
-              checkT8420(this.rawStation.station_sn)
-            ) {
-              this.currentMessageState[message.dataType].p2pStreamMetadata.videoCodec =
-                videoMetaData.streamType === 1
-                  ? VideoCodec.H264
-                  : videoMetaData.streamType === 2
-                    ? VideoCodec.H265
-                    : getVideoCodec(video_data);
-              rootP2PLogger.trace(
-                `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME - Video codec information received from packet`,
-                {
-                  stationSN: this.rawStation.station_sn,
-                  commandIdName: CommandType[message.commandId],
-                  commandId: message.commandId,
-                  channel: message.channel,
-                  metadata: videoMetaData,
-                }
-              );
-            } else if (this.isIFrame(video_data, isKeyFrame)) {
-              this.currentMessageState[message.dataType].p2pStreamMetadata.videoCodec = getVideoCodec(video_data);
-              rootP2PLogger.trace(
-                `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME - Video codec extracted from video data`,
-                {
-                  stationSN: this.rawStation.station_sn,
-                  commandIdName: CommandType[message.commandId],
-                  commandId: message.commandId,
-                  channel: message.channel,
-                  metadata: videoMetaData,
-                }
-              );
-            } else {
-              this.currentMessageState[message.dataType].p2pStreamMetadata.videoCodec = getVideoCodec(video_data);
-              if (this.currentMessageState[message.dataType].p2pStreamMetadata.videoCodec === VideoCodec.UNKNOWN) {
-                this.currentMessageState[message.dataType].p2pStreamMetadata.videoCodec =
-                  videoMetaData.streamType === 1
-                    ? VideoCodec.H264
-                    : videoMetaData.streamType === 2
-                      ? VideoCodec.H265
-                      : VideoCodec.UNKNOWN;
-                if (this.currentMessageState[message.dataType].p2pStreamMetadata.videoCodec === VideoCodec.UNKNOWN) {
-                  rootP2PLogger.debug(
-                    `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME - Unknown video codec`,
-                    {
-                      stationSN: this.rawStation.station_sn,
-                      commandIdName: CommandType[message.commandId],
-                      commandId: message.commandId,
-                      channel: message.channel,
-                      metadata: videoMetaData,
-                    }
-                  );
-                } else {
-                  rootP2PLogger.debug(
-                    `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME - Fallback, using video codec information received from packet`,
-                    {
-                      stationSN: this.rawStation.station_sn,
-                      commandIdName: CommandType[message.commandId],
-                      commandId: message.commandId,
-                      channel: message.channel,
-                      metadata: videoMetaData,
-                    }
-                  );
-                }
-              } else {
-                rootP2PLogger.debug(
-                  `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME - Fallback, video codec extracted from video data`,
-                  {
-                    stationSN: this.rawStation.station_sn,
-                    commandIdName: CommandType[message.commandId],
-                    commandId: message.commandId,
-                    channel: message.channel,
-                    metadata: videoMetaData,
-                  }
-                );
-              }
-            }
-            this.currentMessageState[message.dataType].p2pStreamFirstVideoDataReceived = true;
-            if (!this.currentMessageState[message.dataType].p2pStreamFirstAudioDataReceived) {
-              this.currentMessageState[message.dataType].waitForAudioData = setTimeout(() => {
-                this.currentMessageState[message.dataType].waitForAudioData = undefined;
-                this.currentMessageState[message.dataType].p2pStreamMetadata.audioCodec = AudioCodec.NONE;
-                this.currentMessageState[message.dataType].p2pStreamFirstAudioDataReceived = true;
-                if (
-                  this.currentMessageState[message.dataType].p2pStreamFirstAudioDataReceived &&
-                  this.currentMessageState[message.dataType].p2pStreamFirstVideoDataReceived &&
-                  this.currentMessageState[message.dataType].p2pStreamNotStarted
-                ) {
-                  this.emitStreamStartEvent(message.dataType);
-                }
-              }, this.AUDIO_CODEC_ANALYZE_TIMEOUT);
-            }
-          }
-          if (this.currentMessageState[message.dataType].p2pStreamNotStarted) {
-            if (
-              this.currentMessageState[message.dataType].p2pStreamFirstAudioDataReceived &&
-              this.currentMessageState[message.dataType].p2pStreamFirstVideoDataReceived
-            ) {
-              this.emitStreamStartEvent(message.dataType);
-            }
-          }
-
-          if (message.dataType === P2PDataType.VIDEO) {
-            if (findStartCode(video_data)) {
-              rootP2PLogger.trace(`Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME: startcode found`, {
-                stationSN: this.rawStation.station_sn,
-                isKeyFrame: isKeyFrame,
-                preFrameVideoDataLength: this.currentMessageState[message.dataType].preFrameVideoData.length,
-              });
-              if (!this.currentMessageState[message.dataType].receivedFirstIFrame)
-                this.currentMessageState[message.dataType].receivedFirstIFrame = this.isIFrame(video_data, isKeyFrame);
-
-              if (this.currentMessageState[message.dataType].receivedFirstIFrame) {
-                if (this.currentMessageState[message.dataType].preFrameVideoData.length > this.MAX_VIDEO_PACKET_BYTES)
-                  this.currentMessageState[message.dataType].preFrameVideoData = Buffer.from([]);
-
-                if (this.currentMessageState[message.dataType].preFrameVideoData.length > 0) {
-                  this.currentMessageState[message.dataType].videoStream?.push(
-                    this.currentMessageState[message.dataType].preFrameVideoData
-                  );
-                }
-                this.currentMessageState[message.dataType].preFrameVideoData = Buffer.from(video_data);
-              } else {
-                rootP2PLogger.trace(
-                  `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME: Skipping because first frame is not an I frame.`,
-                  { stationSN: this.rawStation.station_sn }
-                );
-              }
-            } else {
-              rootP2PLogger.trace(
-                `Handle DATA ${P2PDataType[message.dataType]} - CMD_VIDEO_FRAME: No startcode found`,
-                {
-                  stationSN: this.rawStation.station_sn,
-                  isKeyFrame: isKeyFrame,
-                  preFrameVideoDataLength: this.currentMessageState[message.dataType].preFrameVideoData.length,
-                }
-              );
-              if (this.currentMessageState[message.dataType].preFrameVideoData.length > 0) {
-                this.currentMessageState[message.dataType].preFrameVideoData = Buffer.concat([
-                  this.currentMessageState[message.dataType].preFrameVideoData,
-                  video_data,
-                ]);
-              }
-            }
-          } else if (message.dataType === P2PDataType.BINARY) {
             this.currentMessageState[message.dataType].videoStream?.push(video_data);
           }
           break;
