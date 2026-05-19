@@ -2304,46 +2304,40 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
 
     const fullPayloadAfterHeader = message.data.subarray(22);
 
-    if (videoMetaData.videoSeqNo === 0) {
-        try {
-            unlinkSync(dumpFile);
-        } catch {
-            // File may not exist yet; ignore.
-        }
+if (videoMetaData.videoSeqNo === 0) {
+    const manifest = {
+        type: "manifest",
+        purpose: "T8200 final offline dump for signCode video frames",
+        createdAt: new Date().toISOString(),
+        stationSN: this.rawStation.station_sn,
+        dumpFile,
+        note: "Sensitive file. Contains DSK/RSA/session material and raw encrypted video payloads.",
+        driverContext: {
+            hasP2PKey: p2pKeyValue !== undefined,
+            p2pKeyType: typeof p2pKeyValue,
+            p2pKeyLength: 0,
+            hasDskKey: dskKeyValue !== "",
+            dskKeyLength: dskKeyValue !== "" ? dskKeyValue.length : 0,
+            hasRsaKey: rsaPrivateKeyPem !== "",
+            rsaPrivateKeyLength: rsaPrivateKeyPem.length,
+            rsaPublicKeyLength: rsaPublicKeyPem.length,
+        },
+        cryptoMaterial: {
+            dskKeyHex: toHex(dskKeyValue),
+            dskKeyBase64: toBase64(dskKeyValue),
+            p2pKeyHex: toHex(p2pKeyValue),
+            p2pKeyBase64: toBase64(p2pKeyValue),
+            rsaPrivateKeyPemBase64: toBase64(rsaPrivateKeyPem),
+            rsaPublicKeyPemBase64: toBase64(rsaPublicKeyPem),
+        },
+    };
 
-        const manifest = {
-            type: "manifest",
-            purpose: "T8200 final offline dump for signCode video frames",
-            createdAt: new Date().toISOString(),
-            stationSN: this.rawStation.station_sn,
-            dumpFile,
-            note: "Sensitive file. Contains DSK/RSA/session material and raw encrypted video payloads.",
-driverContext: {
-    hasP2PKey: p2pKeyValue !== undefined,
-    p2pKeyType: typeof p2pKeyValue,
-    p2pKeyLength: 0,
-    hasDskKey: dskKeyValue !== "",
-    dskKeyLength: dskKeyValue !== "" ? dskKeyValue.length : 0,
-    hasRsaKey: rsaPrivateKeyPem !== "",
-    rsaPrivateKeyLength: rsaPrivateKeyPem.length,
-    rsaPublicKeyLength: rsaPublicKeyPem.length,
-},
-            cryptoMaterial: {
-                dskKeyHex: toHex(dskKeyValue),
-                dskKeyBase64: toBase64(dskKeyValue),
-                p2pKeyHex: toHex(p2pKeyValue),
-                p2pKeyBase64: toBase64(p2pKeyValue),
-                rsaPrivateKeyPemBase64: toBase64(rsaPrivateKeyPem),
-                rsaPublicKeyPemBase64: toBase64(rsaPublicKeyPem),
-            },
-        };
-
-        try {
-            appendFileSync(dumpFile, `${JSON.stringify(manifest)}\n`);
-        } catch {
-            // Actual error logged below by per-frame write if it fails.
-        }
+    try {
+        appendFileSync(dumpFile, `${JSON.stringify(manifest)}\n`);
+    } catch {
+        // Actual error logged below by per-frame write if it fails.
     }
+}
 
     const frameDump = {
         type: "signCodeFrame",
