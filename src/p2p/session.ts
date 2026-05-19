@@ -3,6 +3,7 @@ import { TypedEmitter } from "tiny-typed-emitter";
 import * as NodeRSA from "node-rsa";
 import { Readable } from "stream";
 import { SortedMap } from "sweet-collections";
+import { privateDecrypt, constants } from "crypto";
 const { parse } = require("date-and-time");
 
 import {
@@ -2237,94 +2238,264 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
-    const findH264StartCodes = (
-        buffer: Buffer,
-        baseOffset: number,
-        scanLength: number
-    ): Array<{ offset: number; prefix: string; nalType: number; first16Hex: string }> => {
-        const results: Array<{ offset: number; prefix: string; nalType: number; first16Hex: string }> = [];
-        const max = Math.min(buffer.length - 5, scanLength);
+    const rsaKey = this.currentMessageState[message.dataType].rsaKey;
 
-        for (let i = 0; i <= max; i++) {
-            const isFourByteStartCode =
-                buffer[i] === 0x00 &&
-                buffer[i + 1] === 0x00 &&
-                buffer[i + 2] === 0x00 &&
-                buffer[i + 3] === 0x01;
+    const looksLikeH264 = (buf: Buffer): boolean => {
+        const maxOffset = Math.min(buf.length - 5, 2048);
 
-            const isThreeByteStartCode =
-                buffer[i] === 0x00 &&
-                buffer[i + 1] === 0x00 &&
-                buffer[i + 2] === 0x01;
+        for (let i = 0; i <= maxOffset; i++) {
+            const four =
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x00 &&
+                buf[i + 3] === 0x01;
 
-            if (isFourByteStartCode) {
-                const nalByte = buffer[i + 4];
-                const nalType = nalByte & 0x1f;
+            const three =
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x01;
 
-                results.push({
-                    offset: baseOffset + i,
-                    prefix: "00000001",
-                    nalType,
-                    first16Hex: buffer.subarray(i, i + 16).toString("hex"),
-                });
-            } else if (isThreeByteStartCode) {
-                const nalByte = buffer[i + 3];
-                const nalType = nalByte & 0x1f;
-
-                results.push({
-                    offset: baseOffset + i,
-                    prefix: "000001",
-                    nalType,
-                    first16Hex: buffer.subarray(i, i + 16).toString("hex"),
-                });
+            if (four) {
+                const nalType = buf[i + 4] & 0x1f;
+                if ([1, 5, 7, 8].includes(nalType)) {
+                    return true;
+                }
             }
 
-            if (results.length >= 20) {
-                break;
+            if (three) {
+                const nalType = buf[i + 3] & 0x1f;
+                if ([1, 5, 7, 8].includes(nalType)) {
+                    return true;
+                }
             }
         }
 
-        return results;
+        return false;
     };
 
-    const sliceForLog = (start: number, length: number): string => {
-        return message.data.subarray(start, start + length).toString("hex");
+    const findFirstH264 = (buf: Buffer): Record<string, unknown> | undefined => {
+        const maxOffset = Math.min(buf.length - 5, 2048);
+
+        for (let i = 0; i <= maxOffset; i++) {
+            const four =
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x00 &&
+                buf[i + 3] === 0x01;
+
+            const three =
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x01;
+
+            if (four) {
+                const nalType = buf[i + 4] & 0x1f;
+                if ([1, 5, 7, 8].includes(nalType)) {
+                    return {
+                        offset: i,
+                        prefix: "00000001",
+                        nalType,
+                        first32Hex: buf.subarray(i, i + 32).toString("hex"),
+                    };
+                }
+            }
+
+            if (three) {
+                const nalType = buf[i + 3] & 0x1f;
+                if ([1, 5, 7, 8].includes(nalType)) {
+                    return {
+                        offset: i,
+                        prefix: "000001",
+                        nalType,
+                        first32Hex: buf.subarray(i, i + 32).toString("hex"),
+                    };
+                }
+            }
+        }
+
+        return undefined;
     };
 
-    const from0 = message.data.subarray(0);
-    const from22 = message.data.subarray(22);
-    const from151 = message.data.subarray(151);
+    const tryAesKey = (
+        key: Buffer,
+        encryptedPayload: Buffer
+    ): Buffer | undefined => {
+        if (![16, 24, 32].includes(key.length)) {
+            return undefined;
+        }
+
+        try {
+            return decryptAESData(key.toString("hex"), encryptedPayload);
+        } catch {
+            return undefined;
+        }
+    };
+
+    let matchFound = false;
+
+    if (rsaKey) {
+        const rsaCandidates: Array<{ name: string; block: Buffer }> = [];
+
+        for (let offset = 0; offset <= 180; offset++) {
+            const block = message.data.subarray(offset, offset + 128);
+
+            if (block.length === 128) {
+                rsaCandidates.push({
+                    name: `offset${offset}_len128`,
+                    block,
+                });
+            }
+        }
+
+        for (const candidate of rsaCandidates) {
+            const decryptedCandidates: Array<{ name: string; data: Buffer }> = [];
+
+            try {
+                const decryptedNodeRsa = rsaKey.decrypt(candidate.block) as Buffer;
+
+                decryptedCandidates.push({
+                    name: `${candidate.name}_nodeRsaDefault`,
+                    data: decryptedNodeRsa,
+                });
+            } catch {
+                // Ignore.
+            }
+
+            const privateKeyPem = rsaKey.exportKey("private") as string;
+
+            for (const paddingTest of [
+                {
+                    name: "RSA_PKCS1_PADDING",
+                    padding: constants.RSA_PKCS1_PADDING,
+                },
+                {
+                    name: "RSA_PKCS1_OAEP_PADDING",
+                    padding: constants.RSA_PKCS1_OAEP_PADDING,
+                },
+                {
+                    name: "RSA_NO_PADDING",
+                    padding: constants.RSA_NO_PADDING,
+                },
+            ]) {
+                try {
+                    const decryptedCrypto = privateDecrypt(
+                        {
+                            key: privateKeyPem,
+                            padding: paddingTest.padding,
+                        },
+                        candidate.block
+                    );
+
+                    decryptedCandidates.push({
+                        name: `${candidate.name}_${paddingTest.name}`,
+                        data: decryptedCrypto,
+                    });
+                } catch {
+                    // Ignore.
+                }
+            }
+
+            for (const decrypted of decryptedCandidates) {
+                const aesKeyCandidates: Array<{ name: string; key: Buffer }> = [];
+
+                if (decrypted.data.length >= 16) {
+                    aesKeyCandidates.push({
+                        name: `${decrypted.name}_first16`,
+                        key: decrypted.data.subarray(0, 16),
+                    });
+
+                    aesKeyCandidates.push({
+                        name: `${decrypted.name}_last16`,
+                        key: decrypted.data.subarray(decrypted.data.length - 16),
+                    });
+                }
+
+                if (decrypted.data.length >= 24) {
+                    aesKeyCandidates.push({
+                        name: `${decrypted.name}_first24`,
+                        key: decrypted.data.subarray(0, 24),
+                    });
+
+                    aesKeyCandidates.push({
+                        name: `${decrypted.name}_last24`,
+                        key: decrypted.data.subarray(decrypted.data.length - 24),
+                    });
+                }
+
+                if (decrypted.data.length >= 32) {
+                    aesKeyCandidates.push({
+                        name: `${decrypted.name}_first32`,
+                        key: decrypted.data.subarray(0, 32),
+                    });
+
+                    aesKeyCandidates.push({
+                        name: `${decrypted.name}_last32`,
+                        key: decrypted.data.subarray(decrypted.data.length - 32),
+                    });
+                }
+
+                for (const aesCandidate of aesKeyCandidates) {
+                    for (const payloadCandidate of [
+                        {
+                            name: "payload_from22",
+                            payload: message.data.subarray(22, 22 + videoMetaData.videoDataLength),
+                        },
+                        {
+                            name: "payload_from151",
+                            payload: message.data.subarray(151, 151 + videoMetaData.videoDataLength),
+                        },
+                    ]) {
+                        const decryptedPayload = tryAesKey(
+                            aesCandidate.key,
+                            payloadCandidate.payload
+                        );
+
+                        if (!decryptedPayload) {
+                            continue;
+                        }
+
+                        const h264 = findFirstH264(decryptedPayload);
+
+                        if (h264) {
+                            matchFound = true;
+
+                            rootP2PLogger.warn(
+                                `T8200 download patch H: AES/RSA match found`,
+                                {
+                                    stationSN: this.rawStation.station_sn,
+                                    rsaCandidate: candidate.name,
+                                    decryptedCandidate: decrypted.name,
+                                    aesCandidate: aesCandidate.name,
+                                    payloadCandidate: payloadCandidate.name,
+                                    aesKeyLength: aesCandidate.key.length,
+                                    h264,
+                                    decryptedPayloadFirst64Hex: decryptedPayload
+                                        .subarray(0, 64)
+                                        .toString("hex"),
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     rootP2PLogger.warn(
-        `T8200 download patch G: signCode frame structure diagnostic`,
+        `T8200 download patch H: signCode AES/RSA diagnostic completed`,
         {
             stationSN: this.rawStation.station_sn,
+            matchFound,
             commandIdName: CommandType[message.commandId],
             commandId: message.commandId,
             channel: message.channel,
             dataLength: data_length,
             signCode: message.signCode,
-            payloadStart,
             videoSeqNo: videoMetaData.videoSeqNo,
             videoFPS: videoMetaData.videoFPS,
             videoWidth: videoMetaData.videoWidth,
             videoHeight: videoMetaData.videoHeight,
             videoDataLength: videoMetaData.videoDataLength,
-
-            messageDataLength: message.data.length,
-
-            first64_from0_hex: sliceForLog(0, 64),
-            first256_from0_hex: sliceForLog(0, 256),
-
-            first64_from22_hex: sliceForLog(22, 64),
-            first256_from22_hex: sliceForLog(22, 256),
-
-            first64_from151_hex: sliceForLog(151, 64),
-            first256_from151_hex: sliceForLog(151, 256),
-
-            h264StartCodes_from0_first2048: findH264StartCodes(from0, 0, 2048),
-            h264StartCodes_from22_first2048: findH264StartCodes(from22, 22, 2048),
-            h264StartCodes_from151_first2048: findH264StartCodes(from151, 151, 2048),
         }
     );
 } else if (message.signCode > 0 && data_length >= 128) {
