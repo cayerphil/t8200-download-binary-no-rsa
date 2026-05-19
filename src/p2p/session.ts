@@ -2239,55 +2239,50 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
     payloadStart = 22;
     videoMetaData.aesKey = "";
 
-    const dump = {
-        stationSN: this.rawStation.station_sn,
-        commandIdName: CommandType[message.commandId],
-        commandId: message.commandId,
-        channel: message.channel,
-        dataLength: data_length,
-        signCode: message.signCode,
-        payloadStart,
-        videoSeqNo: videoMetaData.videoSeqNo,
-        videoFPS: videoMetaData.videoFPS,
-        videoWidth: videoMetaData.videoWidth,
-        videoHeight: videoMetaData.videoHeight,
-        videoDataLength: videoMetaData.videoDataLength,
-        messageDataLength: message.data.length,
-        first64Hex: message.data.subarray(0, 64).toString("hex"),
-        messageDataBase64: message.data.toString("base64"),
-        payloadFrom22Base64: message.data
-            .subarray(22, 22 + videoMetaData.videoDataLength)
-            .toString("base64"),
-        payloadFrom151Base64: message.data
-            .subarray(151, 151 + videoMetaData.videoDataLength)
-            .toString("base64"),
+    const sha256Hex = (buffer: Buffer | string | undefined): string => {
+        if (buffer === undefined || buffer === "") {
+            return "";
+        }
+
+        const crypto = require("crypto");
+        const value = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+
+        return crypto
+            .createHash("sha256")
+            .update(value)
+            .digest("hex");
     };
 
-    try {
-        appendFileSync(
-            "/tmp/t8200_signcode_dump.jsonl",
-            `${JSON.stringify(dump)}\n`
-        );
+    rootP2PLogger.warn(
+        `T8200 download patch J: session key diagnostic`,
+        {
+            stationSN: this.rawStation.station_sn,
+            commandIdName: CommandType[message.commandId],
+            commandId: message.commandId,
+            channel: message.channel,
+            dataLength: data_length,
+            signCode: message.signCode,
+            payloadStart,
 
-        rootP2PLogger.warn(
-            `T8200 download patch I: signCode frame dumped`,
-            {
-                stationSN: this.rawStation.station_sn,
-                videoSeqNo: videoMetaData.videoSeqNo,
-                dataLength: data_length,
-                messageDataLength: message.data.length,
-                dumpFile: "/tmp/t8200_signcode_dump.jsonl",
-            }
-        );
-    } catch (error) {
-        rootP2PLogger.error(
-            `T8200 download patch I: failed to dump signCode frame`,
-            {
-                stationSN: this.rawStation.station_sn,
-                error,
-            }
-        );
-    }
+            videoSeqNo: videoMetaData.videoSeqNo,
+            videoFPS: videoMetaData.videoFPS,
+            videoWidth: videoMetaData.videoWidth,
+            videoHeight: videoMetaData.videoHeight,
+            videoDataLength: videoMetaData.videoDataLength,
+            messageDataLength: message.data.length,
+
+            hasP2PKey: this.p2pKey !== undefined,
+            p2pKeyLength: this.p2pKey !== undefined ? this.p2pKey.length : 0,
+            p2pKeySha256: this.p2pKey !== undefined ? sha256Hex(this.p2pKey) : "",
+
+            hasDskKey: this.dskKey !== "",
+            dskKeyLength: this.dskKey !== "" ? this.dskKey.length : 0,
+            dskKeySha256: this.dskKey !== "" ? sha256Hex(this.dskKey) : "",
+
+            first64From0Hex: message.data.subarray(0, 64).toString("hex"),
+            first64From22Hex: message.data.subarray(22, 86).toString("hex"),
+        }
+    );
 } else if (message.signCode > 0 && data_length >= 128) {
   
             const key = message.data.subarray(22, 150);
