@@ -2227,10 +2227,6 @@ export class P2PClientProtocol extends TypedEmitter<P2PClientProtocolEvents> {
           videoMetaData.videoTimestamp = message.data.subarray(14, 20).readUIntLE(0, 6);
 
           let payloadStart = 22;
-          const isT8200BinaryDownload =
-    message.dataType === P2PDataType.BINARY &&
-    this.rawStation.station_sn.startsWith("T8200") &&
-    this.currentMessageState[P2PDataType.BINARY].p2pStreaming;
 
 const isT8200BinaryDownload =
     message.dataType === P2PDataType.BINARY &&
