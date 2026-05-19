@@ -2232,9 +2232,16 @@ export class P2PClientProtocol extends TypedEmitter<P2PClientProtocolEvents> {
     this.rawStation.station_sn.startsWith("T8200") &&
     this.currentMessageState[P2PDataType.BINARY].p2pStreaming;
 
+const isT8200BinaryDownload =
+    message.dataType === P2PDataType.BINARY &&
+    this.rawStation.station_sn.startsWith("T8200") &&
+    this.currentMessageState[P2PDataType.BINARY].p2pStreaming;
+
 if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
+    payloadStart = 151;
+
     rootP2PLogger.warn(
-        `T8200 download patch: bypassing RSA/AES key unwrap for DATA BINARY frame`,
+        `T8200 download patch B: skipping RSA/AES key block for DATA BINARY frame`,
         {
             stationSN: this.rawStation.station_sn,
             commandIdName: CommandType[message.commandId],
@@ -2246,6 +2253,7 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
         }
     );
 } else if (message.signCode > 0 && data_length >= 128) {
+  
             const key = message.data.subarray(22, 150);
             const rsaKey = this.currentMessageState[message.dataType].rsaKey;
             if (rsaKey) {
