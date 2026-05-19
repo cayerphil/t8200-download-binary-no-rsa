@@ -2234,20 +2234,143 @@ const isT8200BinaryDownload =
     this.currentMessageState[P2PDataType.BINARY].p2pStreaming;
 
 if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
+    const rsaKey = this.currentMessageState[message.dataType].rsaKey;
     payloadStart = 151;
 
-    rootP2PLogger.warn(
-        `T8200 download patch B: skipping RSA/AES key block for DATA BINARY frame`,
-        {
-            stationSN: this.rawStation.station_sn,
-            commandIdName: CommandType[message.commandId],
-            commandId: message.commandId,
-            channel: message.channel,
-            dataLength: data_length,
-            signCode: message.signCode,
-            payloadStart,
-        }
+    const encryptedVideoPrefix = message.data.subarray(payloadStart, payloadStart + 128);
+    const remainingVideoData = message.data.subarray(
+        payloadStart + 128,
+        payloadStart + videoMetaData.videoDataLength
     );
+
+    const looksLikeH264 = (buf: Buffer): boolean => {
+        const maxOffset = Math.min(buf.length - 5, 160);
+
+        for (let i = 0; i <= maxOffset; i++) {
+            if (
+                buf[i] === 0x00 &&
+                buf[i + 1] === 0x00 &&
+                buf[i + 2] === 0x00 &&
+                buf[i + 3] === 0x01
+            ) {
+                const nalType = buf[i + 4] & 0x1f;
+
+                if (
+                    nalType === 1 || // non-IDR slice
+                    nalType === 5 || // IDR
+                    nalType === 7 || // SPS
+                    nalType === 8    // PPS
+                ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    };
+
+    let selectedAESKey = "";
+
+    if (rsaKey) {
+        for (let offset = 0; offset <= 180; offset++) {
+            const candidateBlock = message.data.subarray(offset, offset + 128);
+
+            if (candidateBlock.length !== 128) {
+                continue;
+            }
+
+            try {
+                const decrypted = rsaKey.decrypt(candidateBlock) as Buffer;
+
+                const aesCandidates: Array<{ name: string; key: Buffer }> = [];
+
+                if (decrypted.length >= 16) {
+                    aesCandidates.push({
+                        name: `offset${offset}_first16`,
+                        key: decrypted.subarray(0, 16),
+                    });
+
+                    aesCandidates.push({
+                        name: `offset${offset}_last16`,
+                        key: decrypted.subarray(decrypted.length - 16),
+                    });
+                }
+
+                if (decrypted.length >= 32) {
+                    aesCandidates.push({
+                        name: `offset${offset}_first32`,
+                        key: decrypted.subarray(0, 32),
+                    });
+
+                    aesCandidates.push({
+                        name: `offset${offset}_last32`,
+                        key: decrypted.subarray(decrypted.length - 32),
+                    });
+                }
+
+                for (const aesCandidate of aesCandidates) {
+                    try {
+                        const decryptedPrefix = decryptAESData(
+                            aesCandidate.key.toString("hex"),
+                            encryptedVideoPrefix
+                        );
+
+                        const reconstructedVideo = Buffer.concat([
+                            decryptedPrefix,
+                            remainingVideoData,
+                        ]);
+
+                        if (looksLikeH264(reconstructedVideo)) {
+                            selectedAESKey = aesCandidate.key.toString("hex");
+
+                            rootP2PLogger.warn(
+                                `T8200 download patch E: AES candidate selected`,
+                                {
+                                    stationSN: this.rawStation.station_sn,
+                                    rsaOffset: offset,
+                                    aesCandidate: aesCandidate.name,
+                                    aesKeyLength: aesCandidate.key.length,
+                                    reconstructedFirst32Hex: reconstructedVideo
+                                        .subarray(0, 32)
+                                        .toString("hex"),
+                                }
+                            );
+
+                            break;
+                        }
+                    } catch {
+                        // Ignore failed AES candidates.
+                    }
+                }
+
+                if (selectedAESKey !== "") {
+                    break;
+                }
+            } catch {
+                // Ignore failed RSA candidates.
+            }
+        }
+    }
+
+    if (selectedAESKey !== "") {
+        videoMetaData.aesKey = selectedAESKey;
+
+        rootP2PLogger.warn(
+            `T8200 download patch E: using selected AES key`,
+            {
+                stationSN: this.rawStation.station_sn,
+                payloadStart,
+            }
+        );
+    } else {
+        rootP2PLogger.warn(
+            `T8200 download patch E: no AES key matched, continuing with Patch B behavior`,
+            {
+                stationSN: this.rawStation.station_sn,
+                payloadStart,
+            }
+        );
+    }
 } else if (message.signCode > 0 && data_length >= 128) {
   
             const key = message.data.subarray(22, 150);
