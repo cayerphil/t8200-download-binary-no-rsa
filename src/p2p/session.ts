@@ -2321,11 +2321,7 @@ if (isT8200BinaryDownload && message.signCode > 0 && data_length >= 128) {
 driverContext: {
     hasP2PKey: p2pKeyValue !== undefined,
     p2pKeyType: typeof p2pKeyValue,
-    p2pKeyLength: Buffer.isBuffer(p2pKeyValue)
-        ? p2pKeyValue.length
-        : typeof p2pKeyValue === "string"
-            ? p2pKeyValue.length
-            : 0,
+    p2pKeyLength: 0,
     hasDskKey: dskKeyValue !== "",
     dskKeyLength: dskKeyValue !== "" ? dskKeyValue.length : 0,
     hasRsaKey: rsaPrivateKeyPem !== "",
@@ -2382,7 +2378,7 @@ driverContext: {
 keyContext: {
     hasP2PKey: p2pKeyValue !== undefined,
     p2pKeyType: typeof p2pKeyValue,
-    p2pKeyLength: getValueLength(p2pKeyValue),
+    p2pKeyLength: 0,
     hasDskKey: dskKeyValue !== "",
     dskKeyLength: dskKeyValue !== "" ? dskKeyValue.length : 0,
     hasRsaKey: rsaPrivateKeyPem !== "",
